@@ -4,9 +4,9 @@ A lightweight backend that ingests payment lifecycle events, maintains
 derived transaction state, and exposes reconciliation reports for the
 operations team. Built for the **Setu Solutions Engineer take-home**.
 
-> **Live demo:** _self-hosted via Docker — set this to your server URL,
-> e.g. `http://<your-server>:8000`._ The interactive Swagger UI is at
-> `<base_url>/docs`. See [Deployment](#deployment) for the self-host steps.
+> **Live demo:** <http://69.62.79.171:8000> (self-hosted via Docker).
+> Interactive Swagger UI at <http://69.62.79.171:8000/docs>; liveness at
+> <http://69.62.79.171:8000/healthz>. See [Deployment](#deployment) for the self-host steps.
 
 ---
 
