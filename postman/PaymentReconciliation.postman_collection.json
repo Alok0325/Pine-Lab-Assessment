@@ -1,0 +1,316 @@
+{
+  "info": {
+    "_postman_id": "5b0e4e2c-9b9a-4f1a-8c97-payment-recon",
+    "name": "Payment Reconciliation Service",
+    "description": "Full API walkthrough for the take-home assignment.\n\nSet the `base_url` collection variable to your deployment URL (or `http://localhost:8000`).\n\nEvery request includes example responses you can inspect under the \"Examples\" tab.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8000", "type": "string" },
+    { "key": "transaction_id", "value": "2f86e94c-239c-4302-9874-75f28e3474ee" },
+    { "key": "merchant_id", "value": "merchant_2" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Service banner",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/", "host": ["{{base_url}}"], "path": [""] }
+          }
+        },
+        {
+          "name": "Healthz",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/healthz", "host": ["{{base_url}}"], "path": ["healthz"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Events",
+      "item": [
+        {
+          "name": "Ingest single event",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.variables.set('demo_event_id', pm.variables.replaceIn('{{$guid}}'));",
+                  "pm.variables.set('demo_tx_id', pm.variables.replaceIn('{{$guid}}'));",
+                  "pm.variables.set('demo_ts', new Date().toISOString());"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": {
+              "raw": "{{base_url}}/events",
+              "host": ["{{base_url}}"],
+              "path": ["events"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"event_id\": \"{{demo_event_id}}\",\n  \"event_type\": \"payment_initiated\",\n  \"transaction_id\": \"{{demo_tx_id}}\",\n  \"merchant_id\": \"merchant_1\",\n  \"merchant_name\": \"QuickMart\",\n  \"amount\": 1499.99,\n  \"currency\": \"INR\",\n  \"timestamp\": \"{{demo_ts}}\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Ingest batch (3 events: initiated → processed → settled)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.variables.set('e1', pm.variables.replaceIn('{{$guid}}'));",
+                  "pm.variables.set('e2', pm.variables.replaceIn('{{$guid}}'));",
+                  "pm.variables.set('e3', pm.variables.replaceIn('{{$guid}}'));",
+                  "pm.variables.set('demo_tx_id', pm.variables.replaceIn('{{$guid}}'));",
+                  "var now = Date.now();",
+                  "pm.variables.set('t1', new Date(now - 120000).toISOString());",
+                  "pm.variables.set('t2', new Date(now - 60000).toISOString());",
+                  "pm.variables.set('t3', new Date(now).toISOString());"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": {
+              "raw": "{{base_url}}/events?verbose=true",
+              "host": ["{{base_url}}"],
+              "path": ["events"],
+              "query": [{ "key": "verbose", "value": "true" }]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "[\n  {\n    \"event_id\": \"{{e1}}\",\n    \"event_type\": \"payment_initiated\",\n    \"transaction_id\": \"{{demo_tx_id}}\",\n    \"merchant_id\": \"merchant_1\",\n    \"merchant_name\": \"QuickMart\",\n    \"amount\": 2400.00,\n    \"currency\": \"INR\",\n    \"timestamp\": \"{{t1}}\"\n  },\n  {\n    \"event_id\": \"{{e2}}\",\n    \"event_type\": \"payment_processed\",\n    \"transaction_id\": \"{{demo_tx_id}}\",\n    \"merchant_id\": \"merchant_1\",\n    \"merchant_name\": \"QuickMart\",\n    \"amount\": 2400.00,\n    \"currency\": \"INR\",\n    \"timestamp\": \"{{t2}}\"\n  },\n  {\n    \"event_id\": \"{{e3}}\",\n    \"event_type\": \"settled\",\n    \"transaction_id\": \"{{demo_tx_id}}\",\n    \"merchant_id\": \"merchant_1\",\n    \"merchant_name\": \"QuickMart\",\n    \"amount\": 2400.00,\n    \"currency\": \"INR\",\n    \"timestamp\": \"{{t3}}\"\n  }\n]"
+            },
+            "description": "Sends three events for one transaction. `verbose=true` returns per-event accepted/duplicate status."
+          }
+        },
+        {
+          "name": "Duplicate event (idempotency demo)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": {
+              "raw": "{{base_url}}/events?verbose=true",
+              "host": ["{{base_url}}"],
+              "path": ["events"],
+              "query": [{ "key": "verbose", "value": "true" }]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"event_id\": \"fixed-demo-event-001\",\n  \"event_type\": \"payment_initiated\",\n  \"transaction_id\": \"fixed-demo-tx-001\",\n  \"merchant_id\": \"merchant_3\",\n  \"merchant_name\": \"UrbanEats\",\n  \"amount\": 99.50,\n  \"currency\": \"INR\",\n  \"timestamp\": \"2026-06-01T10:00:00Z\"\n}"
+            },
+            "description": "Run twice. First call returns `accepted=1, duplicates=0`. Second call returns `accepted=0, duplicates=1`."
+          }
+        },
+        {
+          "name": "Reject malformed event",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": {
+              "raw": "{{base_url}}/events",
+              "host": ["{{base_url}}"],
+              "path": ["events"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"event_id\": \"bad-1\",\n  \"event_type\": \"not_a_real_type\",\n  \"transaction_id\": \"bad-tx\",\n  \"merchant_id\": \"merchant_1\",\n  \"amount\": -10,\n  \"timestamp\": \"2026-06-01T10:00:00Z\"\n}"
+            },
+            "description": "Expected 422 — invalid event_type and negative amount."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Transactions",
+      "item": [
+        {
+          "name": "List transactions (default)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/transactions?limit=10",
+              "host": ["{{base_url}}"],
+              "path": ["transactions"],
+              "query": [{ "key": "limit", "value": "10" }]
+            }
+          }
+        },
+        {
+          "name": "Filter by merchant_id",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/transactions?merchant_id={{merchant_id}}&limit=10",
+              "host": ["{{base_url}}"],
+              "path": ["transactions"],
+              "query": [
+                { "key": "merchant_id", "value": "{{merchant_id}}" },
+                { "key": "limit", "value": "10" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Filter by status=settled",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/transactions?status=settled&limit=10",
+              "host": ["{{base_url}}"],
+              "path": ["transactions"],
+              "query": [
+                { "key": "status", "value": "settled" },
+                { "key": "limit", "value": "10" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Filter by date range",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/transactions?start=2026-01-01T00:00:00Z&end=2026-02-01T00:00:00Z&limit=10",
+              "host": ["{{base_url}}"],
+              "path": ["transactions"],
+              "query": [
+                { "key": "start", "value": "2026-01-01T00:00:00Z" },
+                { "key": "end", "value": "2026-02-01T00:00:00Z" },
+                { "key": "limit", "value": "10" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Sort by amount asc, paginate",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/transactions?sort=amount&order=asc&limit=20&offset=0",
+              "host": ["{{base_url}}"],
+              "path": ["transactions"],
+              "query": [
+                { "key": "sort", "value": "amount" },
+                { "key": "order", "value": "asc" },
+                { "key": "limit", "value": "20" },
+                { "key": "offset", "value": "0" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get transaction detail (events + merchant)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/transactions/{{transaction_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["transactions", "{{transaction_id}}"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Reconciliation",
+      "item": [
+        {
+          "name": "Summary by merchant + status",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/reconciliation/summary?group_by=merchant&group_by=status",
+              "host": ["{{base_url}}"],
+              "path": ["reconciliation", "summary"],
+              "query": [
+                { "key": "group_by", "value": "merchant" },
+                { "key": "group_by", "value": "status" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Summary by date",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/reconciliation/summary?group_by=date",
+              "host": ["{{base_url}}"],
+              "path": ["reconciliation", "summary"],
+              "query": [{ "key": "group_by", "value": "date" }]
+            }
+          }
+        },
+        {
+          "name": "All discrepancies",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/reconciliation/discrepancies?limit=20",
+              "host": ["{{base_url}}"],
+              "path": ["reconciliation", "discrepancies"],
+              "query": [{ "key": "limit", "value": "20" }]
+            }
+          }
+        },
+        {
+          "name": "Pending settlements",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/reconciliation/discrepancies?reason=pending_settlement&limit=20",
+              "host": ["{{base_url}}"],
+              "path": ["reconciliation", "discrepancies"],
+              "query": [
+                { "key": "reason", "value": "pending_settlement" },
+                { "key": "limit", "value": "20" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Settled-after-failure",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/reconciliation/discrepancies?reason=settled_after_failure&limit=20",
+              "host": ["{{base_url}}"],
+              "path": ["reconciliation", "discrepancies"],
+              "query": [
+                { "key": "reason", "value": "settled_after_failure" },
+                { "key": "limit", "value": "20" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Discrepancies for a single merchant",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/reconciliation/discrepancies?merchant_id={{merchant_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["reconciliation", "discrepancies"],
+              "query": [{ "key": "merchant_id", "value": "{{merchant_id}}" }]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

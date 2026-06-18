@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "payment-reconciliation-service"
+version = "0.1.0"
+description = "Lightweight backend service for payment event ingestion and reconciliation."
+requires-python = ">=3.11"
+readme = "README.md"
+authors = [{ name = "Alok" }]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]
