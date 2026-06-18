@@ -71,14 +71,8 @@ def summary(
 def discrepancies(
     merchant_id: Annotated[str | None, Query()] = None,
     reason: Annotated[
-        str | None,
-        Query(
-            description=(
-                "Filter to a single discrepancy reason "
-                "(pending_settlement | settled_after_failure | settled_without_payment | "
-                "conflicting_payment_states | amount_mismatch)"
-            )
-        ),
+        schemas.DiscrepancyReason | None,
+        Query(description="Filter to a single discrepancy reason (invalid values are rejected with 422)."),
     ] = None,
     start: Annotated[datetime | None, Query()] = None,
     end: Annotated[datetime | None, Query()] = None,
@@ -89,7 +83,7 @@ def discrepancies(
     return crud.list_discrepancies(
         db,
         merchant_id=merchant_id,
-        reason=reason,
+        reason=reason.value if reason else None,
         start=start,
         end=end,
         limit=limit,

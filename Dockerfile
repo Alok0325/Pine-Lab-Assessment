@@ -17,6 +17,7 @@ RUN pip install -r requirements.txt
 COPY app ./app
 COPY scripts ./scripts
 COPY sample_events.json ./sample_events.json
+COPY sample_events_extra.json ./sample_events_extra.json
 COPY pyproject.toml ./pyproject.toml
 
 RUN mkdir -p /app/data

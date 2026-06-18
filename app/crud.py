@@ -30,10 +30,12 @@ from sqlalchemy import (
     case,
     desc,
     func,
+    or_,
     select,
-    update,
 )
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.orm import Session
 
 from app import models, schemas
 
@@ -59,6 +61,64 @@ _ALLOWED_SORT_FIELDS = {
     "created_at": models.Transaction.created_at,
     "transaction_id": models.Transaction.transaction_id,
 }
+
+# The five discrepancy reasons surfaced by the API. ``pending_settlement`` is the
+# only time-dependent one, so it is evaluated at query time (see below) rather
+# than materialised; the other four are structural and stamped at ingest.
+DISCREPANCY_REASONS = (
+    "pending_settlement",
+    "settled_after_failure",
+    "settled_without_payment",
+    "conflicting_payment_states",
+    "amount_mismatch",
+)
+
+
+def _insert_ignore_conflicts(session: Session, model, rows: list[dict], index_elements: list[str]) -> None:
+    """Bulk INSERT that silently skips rows colliding on a unique key.
+
+    Closes the check-then-insert race: even if a concurrent request inserts the
+    same ``event_id`` / ``merchant_id`` between our pre-check and our write, the
+    ON CONFLICT DO NOTHING makes the insert a safe no-op instead of a 500. The
+    events table is the source of truth, so a skipped row is recomputed correctly
+    from the full history regardless.
+    """
+    if not rows:
+        return
+    dialect = session.get_bind().dialect.name
+    if dialect == "postgresql":
+        stmt = pg_insert(model).values(rows).on_conflict_do_nothing(index_elements=index_elements)
+        session.execute(stmt)
+    elif dialect == "sqlite":
+        stmt = sqlite_insert(model).values(rows).on_conflict_do_nothing(index_elements=index_elements)
+        session.execute(stmt)
+    else:  # pragma: no cover - portability fallback
+        session.execute(model.__table__.insert(), rows)
+
+
+# ---------------- Pending-settlement (evaluated at query time) ---------------- #
+
+
+def pending_settlement_cutoff(now: datetime | None = None) -> datetime:
+    """Instant before which an unsettled-but-processed txn counts as pending."""
+    return (now or datetime.now(timezone.utc)) - PENDING_SETTLEMENT_WINDOW
+
+
+def _pending_settlement_sql(cutoff: datetime):
+    """SQL predicate: processed, not settled, and processed more than 24h ago."""
+    return and_(
+        models.Transaction.processed_at.isnot(None),
+        models.Transaction.settled_at.is_(None),
+        models.Transaction.processed_at <= cutoff,
+    )
+
+
+def is_pending_settlement(tx: models.Transaction, cutoff: datetime) -> bool:
+    return (
+        tx.processed_at is not None
+        and tx.settled_at is None
+        and _ensure_aware(tx.processed_at) <= cutoff
+    )
 
 
 # ---------------- Merchants ---------------- #
@@ -87,12 +147,12 @@ def upsert_merchants_from_events(session: Session, events: Iterable[schemas.Even
     }
 
     new = [
-        models.Merchant(merchant_id=mid, name=name or mid)
+        {"merchant_id": mid, "name": name or mid}
         for mid, name in pairs.items()
         if mid not in existing
     ]
     if new:
-        session.add_all(new)
+        _insert_ignore_conflicts(session, models.Merchant, new, ["merchant_id"])
         session.flush()
     return len(new)
 
@@ -148,8 +208,9 @@ def ingest_events(
     new_events, duplicate_ids = _split_new_vs_duplicate(session, events)
 
     if new_events:
-        session.execute(
-            models.Event.__table__.insert(),
+        _insert_ignore_conflicts(
+            session,
+            models.Event,
             [
                 {
                     "event_id": e.event_id,
@@ -162,6 +223,7 @@ def ingest_events(
                 }
                 for e in new_events
             ],
+            ["event_id"],
         )
 
     affected_tx = {e.transaction_id for e in new_events}
@@ -201,9 +263,12 @@ def ingest_events(
 
 
 def _ensure_aware(ts: datetime) -> datetime:
+    """Canonicalise to UTC. Naive inputs are assumed UTC; aware inputs are
+    converted, so the stored instant is correct regardless of the source offset
+    (SQLite would otherwise drop the offset and keep the wall-clock value)."""
     if ts.tzinfo is None:
         return ts.replace(tzinfo=timezone.utc)
-    return ts
+    return ts.astimezone(timezone.utc)
 
 
 def _derive_state(events: list[models.Event]) -> dict:
@@ -256,6 +321,11 @@ def _derive_state(events: list[models.Event]) -> dict:
 
     settlement_status = "settled" if has_settled else "none"
 
+    # Only *structural* (time-invariant) discrepancies are materialised here.
+    # `pending_settlement` depends on wall-clock age, so it is evaluated at query
+    # time against processed_at/settled_at — see _pending_settlement_sql — which
+    # avoids stale flags on transactions that cross the 24h line after their last
+    # event without any re-ingest.
     reasons: list[str] = []
     if has_processed and has_failed:
         reasons.append("conflicting_payment_states")
@@ -263,10 +333,6 @@ def _derive_state(events: list[models.Event]) -> dict:
         reasons.append("settled_after_failure")
     if has_settled and not has_processed and not has_failed:
         reasons.append("settled_without_payment")
-    if has_processed and not has_settled:
-        age = datetime.now(timezone.utc) - _ensure_aware(processed_at)
-        if age >= PENDING_SETTLEMENT_WINDOW:
-            reasons.append("pending_settlement")
     # Amount mismatch across events.
     amounts = {e.amount for e in events if e.amount is not None}
     if len(amounts) > 1:
@@ -371,17 +437,6 @@ def recompute_transactions(session: Session, transaction_ids: Iterable[str]) -> 
     return touched
 
 
-def recompute_all_transactions(session: Session) -> int:
-    """Recompute derived state for every transaction that has events."""
-    ids = [
-        tid
-        for tid, in session.execute(
-            select(models.Event.transaction_id).distinct()
-        ).all()
-    ]
-    return recompute_transactions(session, ids)
-
-
 # ---------------- Transaction reads ---------------- #
 
 
@@ -411,7 +466,11 @@ def list_transactions(
     if status:
         stmt = stmt.where(models.Transaction.status == status)
     if has_discrepancy is not None:
-        stmt = stmt.where(models.Transaction.has_discrepancy.is_(has_discrepancy))
+        flagged = or_(
+            models.Transaction.has_discrepancy.is_(True),
+            _pending_settlement_sql(pending_settlement_cutoff()),
+        )
+        stmt = stmt.where(flagged if has_discrepancy else ~flagged)
     if start:
         stmt = stmt.where(models.Transaction.last_event_at >= start)
     if end:
@@ -437,9 +496,9 @@ def list_transactions(
 def get_transaction(session: Session, transaction_id: str) -> models.Transaction | None:
     return (
         session.execute(
-            select(models.Transaction)
-            .options(selectinload(models.Transaction.events))
-            .where(models.Transaction.transaction_id == transaction_id)
+            select(models.Transaction).where(
+                models.Transaction.transaction_id == transaction_id
+            )
         )
         .scalars()
         .first()
@@ -488,13 +547,15 @@ def reconciliation_summary(
     if "status" in group_by:
         cols.append(models.Transaction.status.label("status"))
 
+    flagged = or_(
+        models.Transaction.has_discrepancy.is_(True),
+        _pending_settlement_sql(pending_settlement_cutoff()),
+    )
     cols.extend(
         [
             func.count(models.Transaction.id).label("transaction_count"),
             func.coalesce(func.sum(models.Transaction.amount), 0).label("total_amount"),
-            func.sum(
-                case((models.Transaction.has_discrepancy.is_(True), 1), else_=0)
-            ).label("discrepancy_count"),
+            func.sum(case((flagged, 1), else_=0)).label("discrepancy_count"),
         ]
     )
 
@@ -599,6 +660,22 @@ def list_discrepancies(
     limit: int = 50,
     offset: int = 0,
 ) -> schemas.DiscrepancyResponse:
+    cutoff = pending_settlement_cutoff()
+    pending_sql = _pending_settlement_sql(cutoff)
+
+    if reason == "pending_settlement":
+        flag_filter = pending_sql
+    elif reason:
+        # A specific structural reason. The five reason names are never
+        # substrings of one another, so a LIKE on the pipe-delimited column is
+        # unambiguous (and `reason` is enum-validated upstream).
+        flag_filter = and_(
+            models.Transaction.has_discrepancy.is_(True),
+            models.Transaction.discrepancy_reasons.like(f"%{reason}%"),
+        )
+    else:
+        flag_filter = or_(models.Transaction.has_discrepancy.is_(True), pending_sql)
+
     stmt = (
         select(models.Transaction, models.Merchant.name.label("merchant_name"))
         .join(
@@ -606,13 +683,10 @@ def list_discrepancies(
             models.Merchant.merchant_id == models.Transaction.merchant_id,
             isouter=True,
         )
-        .where(models.Transaction.has_discrepancy.is_(True))
+        .where(flag_filter)
     )
     if merchant_id:
         stmt = stmt.where(models.Transaction.merchant_id == merchant_id)
-    if reason:
-        # discrepancy_reasons is a pipe-delimited list.
-        stmt = stmt.where(models.Transaction.discrepancy_reasons.like(f"%{reason}%"))
     if start:
         stmt = stmt.where(models.Transaction.last_event_at >= start)
     if end:
@@ -635,6 +709,8 @@ def list_discrepancies(
             if tx.discrepancy_reasons
             else []
         )
+        if is_pending_settlement(tx, cutoff) and "pending_settlement" not in reasons:
+            reasons.append("pending_settlement")
         items.append(
             schemas.DiscrepancyRow(
                 transaction_id=tx.transaction_id,

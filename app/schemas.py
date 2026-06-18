@@ -27,6 +27,14 @@ class TransactionStatus(str, Enum):
     inconsistent = "inconsistent"
 
 
+class DiscrepancyReason(str, Enum):
+    pending_settlement = "pending_settlement"
+    settled_after_failure = "settled_after_failure"
+    settled_without_payment = "settled_without_payment"
+    conflicting_payment_states = "conflicting_payment_states"
+    amount_mismatch = "amount_mismatch"
+
+
 # -------- Event ingestion -------- #
 
 

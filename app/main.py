@@ -7,6 +7,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import get_settings
 from app.database import get_engine, init_db
@@ -37,6 +38,12 @@ async def lifespan(app: FastAPI):
 
             result = seed_from_file(settings.seed_file)
             logger.info("Auto-seed: %s", result)
+            # On first boot only, also load the supplemental demo file (kept
+            # separate so the provided sample_events.json is never modified).
+            # Idempotent on its fixed event_ids if it ever runs again.
+            if result.get("seeded") and settings.seed_extra_file:
+                extra = seed_from_file(settings.seed_extra_file, force=True)
+                logger.info("Auto-seed (supplemental): %s", extra)
         except Exception:  # noqa: BLE001
             logger.exception("Auto-seed failed (continuing without seed data)")
     yield
@@ -87,6 +94,21 @@ def create_app() -> FastAPI:
                     }
                 }
             ),
+        )
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_handler(_: Request, exc: StarletteHTTPException):
+        # Domain errors raise HTTPException with detail={"code","message"};
+        # normalise everything to a single {"error": {...}} envelope.
+        detail = exc.detail
+        if isinstance(detail, dict):
+            err = {"code": detail.get("code", "error"), "message": detail.get("message", "")}
+        else:
+            err = {"code": "error", "message": str(detail)}
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=jsonable_encoder({"error": err}),
+            headers=getattr(exc, "headers", None),
         )
 
     return app

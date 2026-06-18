@@ -68,12 +68,22 @@ def list_transactions(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"code": "invalid_sort", "message": str(exc)},
         )
+    cutoff = crud.pending_settlement_cutoff()
     return schemas.Page[schemas.TransactionOut](
-        items=[schemas.TransactionOut.model_validate(i) for i in items],
+        items=[_with_pending(schemas.TransactionOut.model_validate(i), i, cutoff) for i in items],
         total=total,
         limit=limit,
         offset=offset,
     )
+
+
+def _with_pending(out: schemas.TransactionOut, tx, cutoff) -> schemas.TransactionOut:
+    """Surface the query-time `pending_settlement` flag on a serialized row."""
+    if crud.is_pending_settlement(tx, cutoff):
+        if "pending_settlement" not in out.discrepancy_reasons:
+            out.discrepancy_reasons = out.discrepancy_reasons + ["pending_settlement"]
+        out.has_discrepancy = True
+    return out
 
 
 @router.get(
@@ -94,7 +104,14 @@ def get_transaction(transaction_id: str, db: Session = Depends(get_db)):
     merchant = crud.get_merchant(db, tx.merchant_id)
     events = crud.get_transaction_events(db, transaction_id)
 
-    detail = schemas.TransactionDetail.model_validate(tx)
-    detail.merchant = schemas.MerchantOut.model_validate(merchant) if merchant else None
-    detail.events = [schemas.EventOut.model_validate(e) for e in events]
-    return detail
+    # Build from TransactionOut (which never touches the events/merchant
+    # relationships) so we don't trigger a redundant lazy load — events are
+    # supplied explicitly and ordered by timestamp.
+    base = _with_pending(
+        schemas.TransactionOut.model_validate(tx), tx, crud.pending_settlement_cutoff()
+    )
+    return schemas.TransactionDetail(
+        **base.model_dump(),
+        merchant=schemas.MerchantOut.model_validate(merchant) if merchant else None,
+        events=[schemas.EventOut.model_validate(e) for e in events],
+    )

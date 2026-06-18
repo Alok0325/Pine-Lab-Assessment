@@ -170,6 +170,51 @@ def test_no_discrepancy_for_recent_processed(client, make_event):
     assert detail["has_discrepancy"] is False
 
 
+def test_discrepancy_settled_without_payment(client, make_event):
+    """A settled event with no preceding processed/failed → settled_without_payment."""
+    tx = str(uuid.uuid4())
+    base = datetime.now(timezone.utc) - timedelta(days=1)
+    events = [
+        make_event(event_type="payment_initiated", transaction_id=tx, timestamp=base),
+        make_event(
+            event_type="settled",
+            transaction_id=tx,
+            timestamp=base + timedelta(hours=2),
+        ),
+    ]
+    client.post("/events", json=events)
+    r = client.get(
+        "/reconciliation/discrepancies", params={"reason": "settled_without_payment"}
+    )
+    assert any(item["transaction_id"] == tx for item in r.json()["items"])
+
+
+def test_invalid_discrepancy_reason_rejected(client):
+    """An unknown reason is rejected with 422 (enum-validated), not silently empty."""
+    r = client.get("/reconciliation/discrepancies", params={"reason": "not_a_reason"})
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "validation_error"
+
+
+def test_pending_settlement_evaluated_at_query_time(client, make_event):
+    """pending_settlement is not persisted; it must surface from a plain read of
+    an old processed-but-unsettled txn with no further events."""
+    tx = str(uuid.uuid4())
+    base = datetime.now(timezone.utc) - timedelta(hours=48)
+    events = [
+        make_event(event_type="payment_initiated", transaction_id=tx, timestamp=base),
+        make_event(
+            event_type="payment_processed",
+            transaction_id=tx,
+            timestamp=base + timedelta(minutes=30),
+        ),
+    ]
+    client.post("/events", json=events)
+    detail = client.get(f"/transactions/{tx}").json()
+    assert detail["has_discrepancy"] is True
+    assert "pending_settlement" in detail["discrepancy_reasons"]
+
+
 def test_discrepancy_amount_mismatch(client, make_event):
     tx = str(uuid.uuid4())
     base = datetime.now(timezone.utc) - timedelta(days=1)

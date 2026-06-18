@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "5b0e4e2c-9b9a-4f1a-8c97-payment-recon",
     "name": "Payment Reconciliation Service",
-    "description": "Full API walkthrough for the take-home assignment.\n\nSet the `base_url` collection variable to your deployment URL (or `http://localhost:8000`).\n\nEvery request includes example responses you can inspect under the \"Examples\" tab.",
+    "description": "Full API walkthrough for the take-home assignment.\n\nSet the `base_url` collection variable to your deployment URL (or `http://localhost:8000`).\n\nEvery request carries `pm.test` assertions (status code + response body), so the whole collection doubles as an automated smoke test. Run it with Postman's Collection Runner or headless:\n\n    newman run postman/PaymentReconciliation.postman_collection.json --env-var base_url=http://localhost:8000\n\nRun against a seeded instance (auto-seed populates the sample data on first boot).",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -16,6 +16,19 @@
       "item": [
         {
           "name": "Service banner",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('has name + docs', () => { pm.expect(b).to.have.property('name'); pm.expect(b).to.have.property('docs'); });"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "GET",
             "url": { "raw": "{{base_url}}/", "host": ["{{base_url}}"], "path": [""] }
@@ -23,6 +36,18 @@
         },
         {
           "name": "Healthz",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('status ok', () => pm.expect(pm.response.json().status).to.eql('ok'));"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "GET",
             "url": { "raw": "{{base_url}}/healthz", "host": ["{{base_url}}"], "path": ["healthz"] }
@@ -44,6 +69,17 @@
                   "pm.variables.set('demo_event_id', pm.variables.replaceIn('{{$guid}}'));",
                   "pm.variables.set('demo_tx_id', pm.variables.replaceIn('{{$guid}}'));",
                   "pm.variables.set('demo_ts', new Date().toISOString());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 202', () => pm.response.to.have.status(202));",
+                  "const b = pm.response.json();",
+                  "pm.test('accepted 1, duplicates 0', () => { pm.expect(b.received).to.eql(1); pm.expect(b.accepted).to.eql(1); pm.expect(b.duplicates).to.eql(0); });"
                 ]
               }
             }
@@ -80,6 +116,18 @@
                   "pm.variables.set('t3', new Date(now).toISOString());"
                 ]
               }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 202', () => pm.response.to.have.status(202));",
+                  "const b = pm.response.json();",
+                  "pm.test('accepted 3, duplicates 0', () => { pm.expect(b.accepted).to.eql(3); pm.expect(b.duplicates).to.eql(0); });",
+                  "pm.test('per-event results returned', () => { pm.expect(b.results).to.be.an('array').with.lengthOf(3); pm.expect(b.results.every(r => r.status === 'accepted')).to.be.true; });"
+                ]
+              }
             }
           ],
           "request": {
@@ -100,6 +148,21 @@
         },
         {
           "name": "Duplicate event (idempotency demo)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 202', () => pm.response.to.have.status(202));",
+                  "const b = pm.response.json();",
+                  "// Run twice: 1st call accepted=1, 2nd call duplicates=1. Either way received=1 and exactly one of accepted/duplicates is 1.",
+                  "pm.test('received 1', () => pm.expect(b.received).to.eql(1));",
+                  "pm.test('idempotent: accepted + duplicates == 1', () => pm.expect(b.accepted + b.duplicates).to.eql(1));"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "POST",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
@@ -118,6 +181,18 @@
         },
         {
           "name": "Reject malformed event",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 422', () => pm.response.to.have.status(422));",
+                  "pm.test('unified error envelope', () => pm.expect(pm.response.json().error.code).to.eql('validation_error'));"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "POST",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
@@ -140,6 +215,20 @@
       "item": [
         {
           "name": "List transactions (default)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('paged shape', () => { pm.expect(b.items).to.be.an('array'); pm.expect(b.total).to.be.a('number'); });",
+                  "pm.test('respects limit', () => pm.expect(b.items.length).to.be.at.most(10));"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "GET",
             "url": {
@@ -152,6 +241,19 @@
         },
         {
           "name": "Filter by merchant_id",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const want = pm.variables.get('merchant_id');",
+                  "pm.test('all items match merchant', () => pm.response.json().items.forEach(t => pm.expect(t.merchant_id).to.eql(want)));"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "GET",
             "url": {
@@ -167,6 +269,18 @@
         },
         {
           "name": "Filter by status=settled",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('all items settled', () => pm.response.json().items.forEach(t => pm.expect(t.status).to.eql('settled')));"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "GET",
             "url": {
@@ -182,6 +296,18 @@
         },
         {
           "name": "Filter by date range",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('items array', () => pm.expect(pm.response.json().items).to.be.an('array'));"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "GET",
             "url": {
@@ -198,6 +324,19 @@
         },
         {
           "name": "Sort by amount asc, paginate",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const amts = pm.response.json().items.map(t => parseFloat(t.amount)).filter(x => !isNaN(x));",
+                  "pm.test('amounts non-decreasing', () => { for (let i = 1; i < amts.length; i++) pm.expect(amts[i]).to.be.at.least(amts[i - 1]); });"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "GET",
             "url": {
@@ -214,7 +353,48 @@
           }
         },
         {
+          "name": "Reject invalid sort field (400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('unified error envelope', () => pm.expect(pm.response.json().error.code).to.eql('invalid_sort'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/transactions?sort=not_a_column",
+              "host": ["{{base_url}}"],
+              "path": ["transactions"],
+              "query": [{ "key": "sort", "value": "not_a_column" }]
+            },
+            "description": "Expected 400 — sort field is allow-listed."
+          }
+        },
+        {
           "name": "Get transaction detail (events + merchant)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('id matches', () => pm.expect(b.transaction_id).to.eql(pm.variables.get('transaction_id')));",
+                  "pm.test('has event history', () => pm.expect(b.events).to.be.an('array').that.is.not.empty);",
+                  "pm.test('has merchant', () => pm.expect(b.merchant).to.be.an('object'));",
+                  "pm.test('events sorted by timestamp asc', () => { const ts = b.events.map(e => e.timestamp); pm.expect(ts).to.eql(ts.slice().sort()); });"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "GET",
             "url": {
@@ -222,6 +402,30 @@
               "host": ["{{base_url}}"],
               "path": ["transactions", "{{transaction_id}}"]
             }
+          }
+        },
+        {
+          "name": "Unknown transaction (404)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 404', () => pm.response.to.have.status(404));",
+                  "pm.test('unified error envelope', () => pm.expect(pm.response.json().error.code).to.eql('transaction_not_found'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/transactions/does-not-exist",
+              "host": ["{{base_url}}"],
+              "path": ["transactions", "does-not-exist"]
+            },
+            "description": "Expected 404 with the shared error envelope."
           }
         }
       ]
@@ -231,6 +435,21 @@
       "item": [
         {
           "name": "Summary by merchant + status",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('rows present', () => pm.expect(b.rows).to.be.an('array').that.is.not.empty);",
+                  "pm.test('totals present', () => { pm.expect(b.totals).to.have.property('transaction_count'); pm.expect(b.totals).to.have.property('discrepancy_count'); });",
+                  "pm.test('rows carry merchant + status', () => b.rows.forEach(r => { pm.expect(r).to.have.property('merchant_id'); pm.expect(r).to.have.property('status'); }));"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "GET",
             "url": {
@@ -246,6 +465,19 @@
         },
         {
           "name": "Summary by date",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('grouped by date', () => { pm.expect(b.group_by).to.include('date'); b.rows.forEach(r => pm.expect(r).to.have.property('date')); });"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "GET",
             "url": {
@@ -257,7 +489,46 @@
           }
         },
         {
+          "name": "Reject invalid group_by (400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('unified error envelope', () => pm.expect(pm.response.json().error.code).to.eql('invalid_group_by'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/reconciliation/summary?group_by=nonsense",
+              "host": ["{{base_url}}"],
+              "path": ["reconciliation", "summary"],
+              "query": [{ "key": "group_by", "value": "nonsense" }]
+            },
+            "description": "Expected 400 — group_by dimensions are allow-listed."
+          }
+        },
+        {
           "name": "All discrepancies",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('paged discrepancy shape', () => { pm.expect(b.items).to.be.an('array'); pm.expect(b.total).to.be.a('number'); });",
+                  "pm.test('every item is flagged', () => b.items.forEach(it => pm.expect(it.reasons).to.be.an('array').that.is.not.empty));"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "GET",
             "url": {
@@ -270,6 +541,18 @@
         },
         {
           "name": "Pending settlements",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('every item carries pending_settlement', () => pm.response.json().items.forEach(it => pm.expect(it.reasons).to.include('pending_settlement')));"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "GET",
             "url": {
@@ -285,6 +568,18 @@
         },
         {
           "name": "Settled-after-failure",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('every item carries settled_after_failure', () => pm.response.json().items.forEach(it => pm.expect(it.reasons).to.include('settled_after_failure')));"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "GET",
             "url": {
@@ -299,7 +594,126 @@
           }
         },
         {
+          "name": "Conflicting payment states",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('every item carries conflicting_payment_states', () => pm.response.json().items.forEach(it => pm.expect(it.reasons).to.include('conflicting_payment_states')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/reconciliation/discrepancies?reason=conflicting_payment_states&limit=20",
+              "host": ["{{base_url}}"],
+              "path": ["reconciliation", "discrepancies"],
+              "query": [
+                { "key": "reason", "value": "conflicting_payment_states" },
+                { "key": "limit", "value": "20" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Settled without payment",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('every item carries settled_without_payment', () => pm.response.json().items.forEach(it => pm.expect(it.reasons).to.include('settled_without_payment')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/reconciliation/discrepancies?reason=settled_without_payment&limit=20",
+              "host": ["{{base_url}}"],
+              "path": ["reconciliation", "discrepancies"],
+              "query": [
+                { "key": "reason", "value": "settled_without_payment" },
+                { "key": "limit", "value": "20" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Amount mismatch",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('every item carries amount_mismatch', () => pm.response.json().items.forEach(it => pm.expect(it.reasons).to.include('amount_mismatch')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/reconciliation/discrepancies?reason=amount_mismatch&limit=20",
+              "host": ["{{base_url}}"],
+              "path": ["reconciliation", "discrepancies"],
+              "query": [
+                { "key": "reason", "value": "amount_mismatch" },
+                { "key": "limit", "value": "20" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Reject invalid reason (422)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 422', () => pm.response.to.have.status(422));",
+                  "pm.test('unified error envelope', () => pm.expect(pm.response.json().error.code).to.eql('validation_error'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/reconciliation/discrepancies?reason=not_a_reason",
+              "host": ["{{base_url}}"],
+              "path": ["reconciliation", "discrepancies"],
+              "query": [{ "key": "reason", "value": "not_a_reason" }]
+            },
+            "description": "Expected 422 — `reason` is validated against the five known reasons."
+          }
+        },
+        {
           "name": "Discrepancies for a single merchant",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const want = pm.variables.get('merchant_id');",
+                  "pm.test('all items match merchant', () => pm.response.json().items.forEach(it => pm.expect(it.merchant_id).to.eql(want)));"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "GET",
             "url": {

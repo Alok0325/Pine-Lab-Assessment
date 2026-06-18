@@ -30,7 +30,7 @@ class Merchant(Base):
     )
 
     transactions: Mapped[list["Transaction"]] = relationship(
-        back_populates="merchant", cascade="save-update", lazy="selectin"
+        back_populates="merchant", cascade="save-update", lazy="select"
     )
 
 
@@ -81,12 +81,15 @@ class Transaction(Base):
         nullable=False,
     )
 
-    merchant: Mapped[Merchant] = relationship(back_populates="transactions", lazy="joined")
+    # Both relationships are lazy="select" (load only on explicit access) so the
+    # high-traffic list path stays a single indexed SELECT. The detail endpoint
+    # loads events explicitly (ordered) via crud.get_transaction_events.
+    merchant: Mapped[Merchant] = relationship(back_populates="transactions", lazy="select")
     events: Mapped[list["Event"]] = relationship(
         back_populates="transaction",
         primaryjoin="Transaction.transaction_id == foreign(Event.transaction_id)",
         viewonly=True,
-        lazy="selectin",
+        lazy="select",
     )
 
     __table_args__ = (

@@ -16,6 +16,21 @@ class Base(DeclarativeBase):
     pass
 
 
+def _normalize_db_url(url: str) -> str:
+    """Pin the Postgres driver to psycopg (v3).
+
+    Managed/self-hosted Postgres typically hands back a bare ``postgres://`` or
+    ``postgresql://`` URL. SQLAlchemy maps both to the ``psycopg2`` DBAPI, which
+    this project does not install (we ship psycopg v3). Rewrite the scheme so the
+    same ``DATABASE_URL`` boots everywhere without a code change.
+    """
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://") :]
+    if url.startswith("postgresql://"):
+        url = "postgresql+psycopg://" + url[len("postgresql://") :]
+    return url
+
+
 def _make_engine(settings: Settings) -> Engine:
     if settings.is_sqlite:
         # Ensure the parent directory exists for file-based SQLite.
@@ -41,7 +56,7 @@ def _make_engine(settings: Settings) -> Engine:
         return engine
 
     return create_engine(
-        settings.database_url,
+        _normalize_db_url(settings.database_url),
         pool_pre_ping=True,
         pool_size=int(os.getenv("DB_POOL_SIZE", "10")),
         max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "20")),

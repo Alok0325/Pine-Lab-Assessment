@@ -4,10 +4,9 @@ A lightweight backend that ingests payment lifecycle events, maintains
 derived transaction state, and exposes reconciliation reports for the
 operations team. Built for the **Setu Solutions Engineer take-home**.
 
-> **Live demo:** _replace this line with your deployment URL after pushing
-> to Render / Fly / Railway — e.g. `https://payment-reconciliation.onrender.com`._
->
-> Once live, the interactive Swagger UI is at `/<base_url>/docs`.
+> **Live demo:** _self-hosted via Docker — set this to your server URL,
+> e.g. `http://<your-server>:8000`._ The interactive Swagger UI is at
+> `<base_url>/docs`. See [Deployment](#deployment) for the self-host steps.
 
 ---
 
@@ -42,7 +41,7 @@ operations team. Built for the **Setu Solutions Engineer take-home**.
 | Validation  | Pydantic v2                                                         |
 | Tests       | Pytest + FastAPI `TestClient`                                       |
 | Packaging   | `requirements.txt` + Docker / docker-compose                        |
-| Deployment  | Render Blueprint (`render.yaml`) — Fly.io and Railway also wired up |
+| Deployment  | Self-hosted via Docker / docker-compose (API + Postgres)            |
 
 There are no other moving parts. No Celery, no Redis, no migration framework
 (table DDL is generated from the SQLAlchemy models on boot — see the
@@ -157,23 +156,31 @@ impossible to land. On every batch:
    so we can return an exact `accepted` vs `duplicates` split in the API
    response. In-batch repeats (same `event_id` in the same request) are
    detected here too.
-2. **Bulk-insert** the new rows in one `INSERT`.
+2. **Bulk-insert** the new rows in one `INSERT ... ON CONFLICT (event_id)
+   DO NOTHING` (dialect-aware: works on both SQLite and Postgres). The
+   `ON CONFLICT` closes the check-then-insert race — if a concurrent request
+   lands the same `event_id` between our pre-check and our write, the insert
+   is a safe no-op instead of a 500. The same pattern guards the merchant
+   upsert.
 3. **Recompute** the affected `transactions` rows from the full event
    history of each touched `transaction_id`. The events table is the
    source of truth, so re-ingesting an already-seen event is a true no-op
    — it can never corrupt transaction state.
 
-Why pre-check instead of relying purely on `ON CONFLICT DO NOTHING`? Two
-reasons:
-- It works identically on SQLite and Postgres without dialect branching.
-- It gives an accurate per-event accepted/duplicate response (with
-  `?verbose=true`) which is useful for partner integrations.
+The pre-check gives an accurate per-event accepted/duplicate response (with
+`?verbose=true`) for partner integrations; the `ON CONFLICT` guarantees the
+write is collision-safe even under concurrency.
 
 ## Discrepancy detection
 
-Computed per transaction during the recompute pass and stored as a
-pipe-delimited list in `transactions.discrepancy_reasons` (also stamped
-into the boolean `has_discrepancy` flag for fast filtering).
+The four **structural** (time-invariant) reasons are computed during the
+recompute pass and stored as a pipe-delimited list in
+`transactions.discrepancy_reasons` (also stamped into the boolean
+`has_discrepancy` flag for fast filtering). `pending_settlement` is the one
+**time-dependent** rule, so it is evaluated **at query time** in SQL
+(`processed_at IS NOT NULL AND settled_at IS NULL AND processed_at < now-24h`)
+rather than materialised — this avoids stale flags on a transaction that
+crosses the 24h line after its last event without any re-ingest.
 
 | Reason                       | Trigger                                                                            |
 | ---------------------------- | ---------------------------------------------------------------------------------- |
@@ -224,17 +231,31 @@ docker compose up --build
 
 ## Seeding
 
-On boot (with `AUTO_SEED=true`) the service loads `sample_events.json`
-into the database if and only if the `events` table is empty. The sample
-file contains ~10,355 events across 5 merchants and 3,800 transactions,
-including ~190 intentional duplicate `event_id`s — exercised by the
-idempotency layer on seed.
+On boot (with `AUTO_SEED=true`) the service seeds the database if and only
+if the `events` table is empty. Two files are loaded:
+
+1. **`sample_events.json`** — the **provided** assignment file, used
+   **as-is, unmodified**: 10,355 events (10,165 unique + 190 intentional
+   duplicate `event_id`s) across 5 merchants and 3,800 transactions,
+   covering successful flows, failures, pending settlements, and
+   settled-after-failure discrepancies.
+2. **`sample_events_extra.json`** — a small **supplemental** file I
+   generated (131 events / 48 transactions) so the remaining three
+   discrepancy reasons — `conflicting_payment_states`,
+   `settled_without_payment`, and `amount_mismatch` — are also present in
+   the running data. The provided file is left intact rather than edited;
+   `ASSIGNMENT.md` explicitly permits generating your own sample data.
+
+Together the running service holds **3,848 transactions** and exercises
+**all five** discrepancy reasons end-to-end (523 flagged transactions).
+The duplicate `event_id`s in both files are absorbed by the idempotency
+layer on seed.
 
 You can also seed manually:
 
 ```bash
-python -m scripts.load_sample_data sample_events.json          # no-op if events already present
-python -m scripts.load_sample_data sample_events.json --force  # seed regardless
+python -m scripts.load_sample_data sample_events.json          # provided file; no-op if events already present
+python -m scripts.load_sample_data sample_events_extra.json --force  # supplemental discrepancy data
 ```
 
 ## API reference
@@ -333,22 +354,25 @@ curl 'http://localhost:8000/reconciliation/summary?group_by=merchant&group_by=st
       "merchant_name": "QuickMart",
       "date": null,
       "status": "settled",
-      "transaction_count": 612,
-      "total_amount": "9120385.40",
+      "transaction_count": 510,
+      "total_amount": "12686820.60",
       "discrepancy_count": 0
-    },
-    ...
+    }
+    // ... one row per (merchant, status) combination
   ],
   "totals": {
-    "transaction_count": 3800,
-    "total_amount": "...",
-    "discrepancy_count": 421
+    "transaction_count": 3848,
+    "total_amount": "95277913.19",
+    "discrepancy_count": 523
   }
 }
 ```
 
 The grouping, filtering, and aggregation are all done in SQL — no Python
-loops over the dataset.
+loops over the dataset. `discrepancy_count` includes the query-time
+`pending_settlement` rule, so it is evaluated against the current time (the
+seed timestamps are fixed in Jan–Apr 2026, so the number is stable for any
+review date after that window).
 
 ### `GET /reconciliation/discrepancies`
 
@@ -361,9 +385,11 @@ curl 'http://localhost:8000/reconciliation/discrepancies?reason=pending_settleme
 
 ### Errors
 
-All non-2xx responses are JSON. Validation failures return HTTP 422 with
-a structured `{"error": {"code", "message", "details": [...]}}` body.
-Domain errors return 4xx with `{"detail": {"code", "message"}}`.
+All non-2xx responses share one JSON envelope: `{"error": {"code",
+"message"}}`. Request-validation failures (HTTP 422) add a `details` array
+with the per-field Pydantic errors. So a bad `reason`, an unknown sort
+field, a missing transaction, and an oversized batch all return the same
+predictable shape.
 
 ## Testing
 
@@ -371,7 +397,7 @@ Domain errors return 4xx with `{"detail": {"code", "message"}}`.
 .venv/bin/python -m pytest
 ```
 
-The suite (25 tests, ~0.5s) covers:
+The suite (28 tests, ~0.5s) covers:
 
 - ingestion of single + batch events
 - in-request and cross-request idempotency
@@ -380,8 +406,12 @@ The suite (25 tests, ~0.5s) covers:
 - transaction list filters, pagination, sorting, date ranges
 - transaction detail with event history + merchant join
 - reconciliation summary group-bys + invalid group rejection
-- each discrepancy reason (`pending_settlement`, `settled_after_failure`,
+- **all five** discrepancy reasons (`pending_settlement`,
+  `settled_after_failure`, `settled_without_payment`,
   `conflicting_payment_states`, `amount_mismatch`)
+- `pending_settlement` surfacing at query time from a plain read (no
+  re-ingest needed)
+- invalid `reason` rejected with 422; unified `{"error": {...}}` envelope
 - negative case: recent processed events are NOT flagged
 
 Each test gets a fresh on-disk SQLite database (parallel-safe).
@@ -393,6 +423,18 @@ A ready-to-import collection lives at
 Set the `base_url` variable to your deployment URL (or
 `http://localhost:8000`).
 
+Every request carries `pm.test` assertions (status code + response body),
+so the collection **doubles as an automated smoke test** — 25 requests /
+59 assertions covering happy paths, all five discrepancy reasons, and the
+422/404/400 error envelope. Run it headless against a seeded instance:
+
+```bash
+npx newman run postman/PaymentReconciliation.postman_collection.json \
+  --env-var base_url=http://localhost:8000
+```
+
+It is safe to re-run (the idempotency check holds on repeat).
+
 Highlights:
 - **Ingest single / batch** — auto-generates UUIDs in pre-request scripts.
 - **Duplicate event** — uses a fixed `event_id` so two consecutive runs
@@ -400,71 +442,55 @@ Highlights:
 - **Reject malformed event** — expected 422.
 - Filtered transaction list, paginated, sorted.
 - Summary by merchant+status, by date.
-- Discrepancies all / by reason / by merchant.
+- Discrepancies all / by each of the five reasons / by merchant, plus an
+  invalid-reason request that returns 422.
 
 ## Deployment
 
-This repo ships configuration for four platforms — pick whichever is
-easiest for you. The reviewer can also run it locally in <2 minutes
-following [Local setup](#local-setup).
+The service is **self-hosted via Docker** on your own server. The image is
+self-contained: it bundles `sample_events.json` and auto-seeds on first
+boot, so a fresh host is fully populated with one command.
 
-### Render (recommended — one-click Blueprint)
+### Option A — docker-compose (API + Postgres, recommended)
 
-1. Push this repo to GitHub.
-2. Go to <https://dashboard.render.com> → **New** → **Blueprint** →
-   connect the repo.
-3. Render reads `render.yaml`, provisions a free Postgres DB, builds the
-   Docker image, sets `DATABASE_URL` automatically, and starts the
-   service.
-4. On first boot the auto-seed routine populates the DB from
-   `sample_events.json`. Subsequent boots are no-ops.
-
-After deploy, hit `/docs` to verify, then use the URL as `base_url` in
-the Postman collection.
-
-> Note: the Render **free** plan sleeps after 15 minutes of inactivity.
-> Cold starts take ~30 seconds. For a smoother demo, use Render's
-> `starter` plan or pick Fly.io / Railway instead.
-
-### Fly.io
+On the server:
 
 ```bash
-fly launch --no-deploy --copy-config
-fly volumes create data --size 1
-fly deploy
+git clone <this-repo> && cd Assessment
+docker compose up -d --build
 ```
 
-The default `fly.toml` uses a persistent volume + SQLite. To swap to Fly
-Postgres:
+This boots the API (port `8000`) and a Postgres 16 instance, waits for the
+DB health check, then auto-seeds. The compose file points `DATABASE_URL`
+at `postgresql+psycopg://app:app@db:5432/app`. Verify with:
 
 ```bash
-fly postgres create
-fly postgres attach <postgres-app-name> -a payment-reconciliation
+curl http://<your-server>:8000/healthz      # {"status":"ok"}
+open  http://<your-server>:8000/docs         # Swagger UI
 ```
 
-### Railway
-
-A `railway.json` is included. Connect the repo in Railway, add a Postgres
-plugin, and set the `DATABASE_URL` reference — Railway picks up the
-Dockerfile automatically.
-
-### Docker / docker-compose (local Postgres)
-
-```bash
-docker compose up --build
-```
-
-Boots the API + a Postgres instance and seeds on first startup.
-
-### Anywhere with Docker
+### Option B — single container + SQLite (zero DB to manage)
 
 ```bash
 docker build -t payment-reconciliation .
-docker run -p 8000:8000 \
+docker run -d -p 8000:8000 \
   -e DATABASE_URL=sqlite:////app/data/app.db \
   -v $(pwd)/data:/app/data \
   payment-reconciliation
 ```
+
+The volume persists the SQLite file across restarts.
+
+### Notes
+
+- **Any managed/self-hosted Postgres just works.** `DATABASE_URL` accepts a
+  bare `postgres://` or `postgresql://` URL — the app normalises the scheme
+  to the bundled `psycopg` (v3) driver at startup, so there's no driver
+  mismatch to debug.
+- **Put it behind a reverse proxy** (nginx/Caddy) for TLS if exposing
+  publicly; the app itself serves plain HTTP on `PORT` (default `8000`).
+- The reviewer can also run it locally in <2 minutes following
+  [Local setup](#local-setup) — no server required.
 
 ## Assumptions and tradeoffs
 
@@ -494,11 +520,16 @@ docker run -p 8000:8000 \
 - **`event_id` is treated as opaque and authoritative.** Partners are
   expected to generate stable IDs per event; we don't fall back to content
   hashing if it's missing.
-- **Discrepancy state is materialised at ingest time, not query time.**
-  This keeps the discrepancies endpoint a single-index scan. The downside:
-  if business rules change (e.g. the 24h window), historical flags don't
-  refresh until a re-ingest or a `recompute_all_transactions()` call.
-  A `POST /admin/recompute` is one obvious next addition.
+- **Discrepancy state is split: structural reasons are materialised, the
+  time-dependent one is evaluated at query time.** The four time-invariant
+  reasons (`conflicting_payment_states`, `settled_after_failure`,
+  `settled_without_payment`, `amount_mismatch`) are stamped onto the
+  transaction row at ingest, so filtering them is a single-index scan.
+  `pending_settlement` depends on wall-clock age, so it is computed in SQL
+  on read against `processed_at`/`settled_at`. This deliberately avoids the
+  classic staleness bug where a materialised "pending" flag never fires for
+  a transaction that crosses the 24h line after its last event. The 24h
+  window is a single constant (`PENDING_SETTLEMENT_WINDOW` in `app/crud.py`).
 - **No auth, no rate limiting, no CORS lockdown.** The assignment scope is
   a partner-facing service; for production you'd put this behind an API
   gateway (mTLS / signed webhooks) and add Pydantic-level rate limits per
@@ -524,15 +555,16 @@ Per the assignment prompt:
   access patterns, decided on the idempotency strategy (pre-check vs
   ON CONFLICT), tuned the discrepancy rules, validated against the
   sample data, and ran the test suite to ground-truth the behaviour.
-- **What I did not use AI for:** the deployment itself (you'll need to
-  push to GitHub and connect Render/Fly yourself — I prepared the
-  configs but didn't push from my machine to your account).
+- **What I did not use AI for:** the deployment itself — the service is
+  self-hosted via Docker on my own server; the Docker/compose configs are
+  mine and the live instance was brought up by hand.
 
 ## What I would do with more time
 
 - **Alembic migrations** for schema evolution.
-- **A `/admin/recompute` endpoint** so business-rule changes can rebuild
-  derived state without touching events.
+- **A `/admin/recompute` endpoint** to rebuild the materialised structural
+  discrepancy flags in bulk if those rules ever change (the time-dependent
+  `pending_settlement` rule already needs no rebuild — it's query-time).
 - **Webhook authentication** (HMAC signed payloads keyed per merchant)
   so the ingest endpoint is safe to expose publicly.
 - **Cursor-based pagination** for `/transactions` to make page navigation

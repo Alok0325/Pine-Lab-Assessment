@@ -123,3 +123,7 @@ logs/
 *.orig
 .tmp/
 tmp/
+
+# Local-only files (not pushed)
+ASSIGNMENT.md
+DEMO_SCRIPT.md

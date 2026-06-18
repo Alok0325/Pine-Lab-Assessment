@@ -23,6 +23,9 @@ class Settings(BaseSettings):
 
     auto_seed: bool = True
     seed_file: str = "sample_events.json"
+    # Optional supplemental data (kept separate so the provided sample_events.json
+    # stays untouched). Adds the discrepancy types absent from the provided file.
+    seed_extra_file: str = "sample_events_extra.json"
 
     @property
     def is_sqlite(self) -> bool:

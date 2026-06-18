@@ -143,4 +143,5 @@ def test_transaction_detail_has_events(client, make_event):
 def test_transaction_not_found(client):
     r = client.get("/transactions/does-not-exist")
     assert r.status_code == 404
-    assert r.json()["detail"]["code"] == "transaction_not_found"
+    # All errors share one envelope: {"error": {"code", "message"}}
+    assert r.json()["error"]["code"] == "transaction_not_found"
